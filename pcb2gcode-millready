@@ -20,7 +20,12 @@ import sys
 import math
 
 # Constants
-# (MIN_PATTERN_LINES is no longer used and has been removed)
+# Regex patterns for G-code commands to filter out (comment out in output)
+# These are single-line commands that are unsupported by many G-code senders
+FILTER_PATTERNS = [
+    r"G64\b",  # Path control mode (LinuxCNC specific)
+    r"G94\b",  # Feed rate mode (often unsupported)
+]
 
 
 def swap_z_and_xy_moves(infile, outfile):
@@ -136,16 +141,19 @@ def swap_z_and_xy_moves(infile, outfile):
 
 def remove_m6_sequences(infile, outfile):
     """
-    Remove M6 tool change sequences from G-code. This removes everything from
-    the retract to tool change height (G00 Z...) through the lines before the
-    spindle restart (M3).
+    Remove M6 tool change sequences and filter out unsupported G-code commands.
+
+    This function:
+    1. Comments out any lines matching patterns in FILTER_PATTERNS constant
+    2. Removes M6 tool change sequences (from retract to tool change height
+       through the lines before spindle restart M3)
 
     Args:
         infile (str): Path to input G-code file
         outfile (str): Path to output G-code file
 
     Returns:
-        int: Number of tool change sequences removed
+        tuple: (sequences_removed, commands_filtered)
     """
     # Read the input file
     with open(infile, "r") as f:
@@ -154,9 +162,24 @@ def remove_m6_sequences(infile, outfile):
     new_lines = []
     i = 0
     sequences_removed = 0
+    commands_filtered = 0
 
     while i < len(lines):
         current_line_stripped = lines[i].strip()
+
+        # Check if line matches any filter pattern
+        should_filter = False
+        for pattern in FILTER_PATTERNS:
+            if re.match(pattern, current_line_stripped):
+                should_filter = True
+                break
+
+        if should_filter:
+            # Comment out the line
+            new_lines.append(f"( {current_line_stripped} )\n")
+            commands_filtered += 1
+            i += 1
+            continue
 
         # Look for retract to tool change height (G00 Z followed by numbers)
         # This typically appears as "G00 Z35.00000 (Retract to tool change height)"
@@ -195,12 +218,17 @@ def remove_m6_sequences(infile, outfile):
     with open(outfile, "w") as f:
         f.writelines(new_lines)
 
-    if sequences_removed > 0:
-        print(f"Removed {sequences_removed} M6 tool change sequence(s). Modified G-code saved to {outfile}")
+    if sequences_removed > 0 or commands_filtered > 0:
+        msg_parts = []
+        if sequences_removed > 0:
+            msg_parts.append(f"removed {sequences_removed} M6 tool change sequence(s)")
+        if commands_filtered > 0:
+            msg_parts.append(f"commented out {commands_filtered} unsupported command(s)")
+        print(f"{msg_parts[0].capitalize() if msg_parts else 'Modified'}, {', '.join(msg_parts[1:])}. G-code saved to {outfile}")
     else:
-        print(f"No M6 tool change sequences found to remove. G-code copied to {outfile}")
+        print(f"No M6 tool change sequences or unsupported commands found. G-code copied to {outfile}")
 
-    return sequences_removed
+    return (sequences_removed, commands_filtered)
 
 
 def main():
