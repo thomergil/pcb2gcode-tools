@@ -1,1 +1,13 @@
 .cursor/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+env/
+venv/
+.venv/
+.DS_Store
+CLAUDE.md

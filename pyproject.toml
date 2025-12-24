@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pcb2gcode-tools"
+version = "1.0.0"
+description = "Post-processing tools for pcb2gcode G-code output"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Thomas Homer-Dixon"}
+]
+keywords = ["pcb", "gcode", "cnc", "milling"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Manufacturing",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "pygcode",
+]
+
+[project.scripts]
+pcb2gcode-fixup = "pcb2gcode_tools.fixup:main"
+pcb2gcode-combine = "pcb2gcode_tools.combine:main"
+pcb2gcode-wrapper = "pcb2gcode_tools.wrapper:main"
+
+[project.urls]
+Homepage = "https://github.com/thomergil/pcb2gcode-tools"
+Repository = "https://github.com/thomergil/pcb2gcode-tools"
+
+[tool.setuptools.packages.find]
+where = ["src"]

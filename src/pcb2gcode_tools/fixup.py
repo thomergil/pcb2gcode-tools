@@ -9,8 +9,6 @@ moves to position first before plunging. This reduces the risk of damaging the
 drill bit and a jig.
 
 It can also remove M6 tool change sequences.
-
-Note: This code was mostly generated with the assistance of AI (Claude).
 """
 
 import re
@@ -26,6 +24,11 @@ FILTER_PATTERNS = [
     r"G64\b",  # Path control mode (LinuxCNC specific)
     r"G94\b",  # Feed rate mode (often unsupported)
 ]
+
+# Default minimum segment length in mm
+# Segments shorter than this are considered Voronoi artifacts and removed
+# Set to 0 to disable (use pcb2gcode's --min-path-length instead)
+DEFAULT_MIN_SEGMENT_LENGTH = 0
 
 
 def swap_z_and_xy_moves(infile, outfile):
@@ -139,21 +142,71 @@ def swap_z_and_xy_moves(infile, outfile):
     return swapped
 
 
-def remove_m6_sequences(infile, outfile):
+def filter_unsupported_commands(infile, outfile):
     """
-    Remove M6 tool change sequences and filter out unsupported G-code commands.
+    Filter out unsupported G-code commands by commenting them out.
 
-    This function:
-    1. Comments out any lines matching patterns in FILTER_PATTERNS constant
-    2. Removes M6 tool change sequences (from retract to tool change height
-       through the lines before spindle restart M3)
+    Comments out any lines matching patterns in FILTER_PATTERNS constant.
+    Handles lines that already contain G-code comments (parentheses) by
+    converting inner parentheses to square brackets to avoid invalid
+    nested parentheses.
 
     Args:
         infile (str): Path to input G-code file
         outfile (str): Path to output G-code file
 
     Returns:
-        tuple: (sequences_removed, commands_filtered)
+        int: Number of commands filtered
+    """
+    with open(infile, "r") as f:
+        lines = f.readlines()
+
+    new_lines = []
+    commands_filtered = 0
+
+    for line in lines:
+        line_stripped = line.strip()
+
+        # Check if line matches any filter pattern
+        should_filter = False
+        for pattern in FILTER_PATTERNS:
+            if re.match(pattern, line_stripped):
+                should_filter = True
+                break
+
+        if should_filter:
+            # Comment out the line, converting any existing parens to brackets
+            # to avoid invalid nested parentheses in G-code
+            commented_content = line_stripped.replace("(", "[").replace(")", "]")
+            new_lines.append(f"( {commented_content} )\n")
+            commands_filtered += 1
+        else:
+            new_lines.append(line)
+
+    with open(outfile, "w") as f:
+        f.writelines(new_lines)
+
+    if commands_filtered > 0:
+        print(f"Commented out {commands_filtered} unsupported command(s). G-code saved to {outfile}")
+    else:
+        print(f"No unsupported commands found. G-code copied to {outfile}")
+
+    return commands_filtered
+
+
+def remove_m6_sequences(infile, outfile):
+    """
+    Remove M6 tool change sequences.
+
+    Removes M6 tool change sequences (from retract to tool change height
+    through the lines before spindle restart M3).
+
+    Args:
+        infile (str): Path to input G-code file
+        outfile (str): Path to output G-code file
+
+    Returns:
+        int: Number of sequences removed
     """
     # Read the input file
     with open(infile, "r") as f:
@@ -162,24 +215,9 @@ def remove_m6_sequences(infile, outfile):
     new_lines = []
     i = 0
     sequences_removed = 0
-    commands_filtered = 0
 
     while i < len(lines):
         current_line_stripped = lines[i].strip()
-
-        # Check if line matches any filter pattern
-        should_filter = False
-        for pattern in FILTER_PATTERNS:
-            if re.match(pattern, current_line_stripped):
-                should_filter = True
-                break
-
-        if should_filter:
-            # Comment out the line
-            new_lines.append(f"( {current_line_stripped} )\n")
-            commands_filtered += 1
-            i += 1
-            continue
 
         # Look for retract to tool change height (G00 Z followed by numbers)
         # This typically appears as "G00 Z35.00000 (Retract to tool change height)"
@@ -218,17 +256,126 @@ def remove_m6_sequences(infile, outfile):
     with open(outfile, "w") as f:
         f.writelines(new_lines)
 
-    if sequences_removed > 0 or commands_filtered > 0:
-        msg_parts = []
-        if sequences_removed > 0:
-            msg_parts.append(f"removed {sequences_removed} M6 tool change sequence(s)")
-        if commands_filtered > 0:
-            msg_parts.append(f"commented out {commands_filtered} unsupported command(s)")
-        print(f"{msg_parts[0].capitalize() if msg_parts else 'Modified'}, {', '.join(msg_parts[1:])}. G-code saved to {outfile}")
+    if sequences_removed > 0:
+        print(f"Removed {sequences_removed} M6 tool change sequence(s). G-code saved to {outfile}")
     else:
-        print(f"No M6 tool change sequences or unsupported commands found. G-code copied to {outfile}")
+        print(f"No M6 tool change sequences found. G-code copied to {outfile}")
 
-    return (sequences_removed, commands_filtered)
+    return sequences_removed
+
+
+def remove_tiny_segments(infile, outfile, min_length=DEFAULT_MIN_SEGMENT_LENGTH):
+    """
+    Remove tiny milling segments that are artifacts from Voronoi region generation.
+
+    These segments consist of:
+    - A rapid move to position (G00 X Y)
+    - A plunge to cutting depth (G01 Z-depth)
+    - Very short cutting moves (total distance < min_length)
+    - A retract (G00 Z safe_height)
+
+    Such segments create tiny dots that serve no useful purpose and waste time.
+
+    Args:
+        infile (str): Path to input G-code file
+        outfile (str): Path to output G-code file
+        min_length (float): Minimum segment length in mm (default 0.1)
+
+    Returns:
+        int: Number of tiny segments removed
+    """
+    with open(infile, "r") as f:
+        lines = f.readlines()
+
+    new_lines = []
+    i = 0
+    segments_removed = 0
+
+    # Regex patterns
+    rapid_xy_pattern = re.compile(r"G0[0]?\s+X([0-9.-]+)\s*Y([0-9.-]+)")
+    plunge_pattern = re.compile(r"G01\s+Z\s*(-[0-9.]+)")
+    cut_xy_pattern = re.compile(r"G01\s+X([0-9.-]+)\s*Y([0-9.-]+)")
+    retract_pattern = re.compile(r"G0[0]?\s+Z\s*([0-9.]+)")
+
+    while i < len(lines):
+        line = lines[i]
+        line_stripped = line.strip()
+
+        # Look for rapid move to begin a segment
+        rapid_match = rapid_xy_pattern.match(line_stripped)
+        if rapid_match and "rapid move to begin" in line_stripped:
+            start_x = float(rapid_match.group(1))
+            start_y = float(rapid_match.group(2))
+
+            # Collect the potential segment
+            segment_lines = [line]
+            j = i + 1
+            in_cut = False
+            cut_moves = []
+            segment_end = -1
+
+            while j < len(lines):
+                next_line = lines[j]
+                next_stripped = next_line.strip()
+                segment_lines.append(next_line)
+
+                # Check for plunge
+                if plunge_pattern.match(next_stripped):
+                    in_cut = True
+                    j += 1
+                    continue
+
+                # Check for cutting moves
+                if in_cut:
+                    cut_match = cut_xy_pattern.match(next_stripped)
+                    if cut_match:
+                        cut_moves.append((float(cut_match.group(1)), float(cut_match.group(2))))
+                        j += 1
+                        continue
+
+                # Check for retract (end of segment)
+                retract_match = retract_pattern.match(next_stripped)
+                if retract_match and float(retract_match.group(1)) > 0:
+                    segment_end = j
+                    break
+
+                # Other lines (comments, dwell, feedrate) - continue collecting
+                j += 1
+                if j - i > 20:  # Safety limit
+                    break
+
+            if segment_end > 0 and len(cut_moves) > 0:
+                # Calculate total segment length
+                total_length = 0.0
+                prev_x, prev_y = start_x, start_y
+                for x, y in cut_moves:
+                    dx = x - prev_x
+                    dy = y - prev_y
+                    total_length += math.sqrt(dx * dx + dy * dy)
+                    prev_x, prev_y = x, y
+
+                if total_length < min_length:
+                    # Skip this segment entirely
+                    segments_removed += 1
+                    i = segment_end + 1
+                    continue
+
+            # Not a tiny segment, keep it
+            new_lines.append(line)
+            i += 1
+        else:
+            new_lines.append(line)
+            i += 1
+
+    with open(outfile, "w") as f:
+        f.writelines(new_lines)
+
+    if segments_removed > 0:
+        print(f"Removed {segments_removed} tiny segment(s) shorter than {min_length}mm. G-code saved to {outfile}")
+    else:
+        print(f"No tiny segments found. G-code copied to {outfile}")
+
+    return segments_removed
 
 
 def main():
@@ -250,7 +397,11 @@ def main():
     parser.add_argument("outfile", help="Output G-code file")
     parser.add_argument("--remove-m6", action="store_true",
                        help="Remove M6 tool change sequences")
-    parser.add_argument("--version", action="version", version="%(prog)s 1.0.0")
+    parser.add_argument("--min-segment-length", type=float, default=DEFAULT_MIN_SEGMENT_LENGTH,
+                       metavar="MM",
+                       help=f"Remove milling segments shorter than MM millimeters (default: {DEFAULT_MIN_SEGMENT_LENGTH}). "
+                            "These are typically Voronoi artifacts that create useless tiny dots. "
+                            "Set to 0 to disable.")
 
     args = parser.parse_args()
 
@@ -269,10 +420,17 @@ def main():
     try:
         current_file = args.infile
 
+        print("Processing: Filtering unsupported commands...")
+        filter_unsupported_commands(current_file, args.outfile)
+        current_file = args.outfile
+
         if args.remove_m6:
             print("Processing: Removing M6 tool change sequences...")
             remove_m6_sequences(current_file, args.outfile)
-            current_file = args.outfile
+
+        if args.min_segment_length > 0:
+            print(f"Processing: Removing tiny segments (<{args.min_segment_length}mm)...")
+            remove_tiny_segments(current_file, args.outfile, args.min_segment_length)
 
         print("Processing: Swapping Z and X,Y moves...")
         swap_z_and_xy_moves(current_file, args.outfile)
