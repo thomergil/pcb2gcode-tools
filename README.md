@@ -1,6 +1,6 @@
 # pcb2gcode-tools
 
-Post-processing tools for [pcb2gcode](https://github.com/pcb2gcode/pcb2gcode) G-code output, optimized for CNC machines like the Carbide 3D Nomad 3 with [OpenCNCPilot](https://github.com/martin2250/OpenCNCPilot).
+Post-processing tools for [pcb2gcode](https://github.com/pcb2gcode/pcb2gcode) G-code output, optimized (including safety) for CNC machines like the Carbide 3D Nomad 3 with [OpenCNCPilot](https://github.com/martin2250/OpenCNCPilot). 
 
 ## Installation
 
@@ -11,7 +11,7 @@ pipx install git+https://github.com/thomergil/pcb2gcode-tools
 
 This installs three commands:
 - `pcb2gcode-wrapper` - Runs `pcb2gcode` with automatic offset calculation
-- `pcb2gcode-fixup` - Post-processes G-code for compatibility
+- `pcb2gcode-fixup` - Post-processes G-code for compatibility and safety
 - `pcb2gcode-combine` - Combines multiple G-code files into one
 
 ## Quick Start
@@ -31,7 +31,7 @@ pcb2gcode-wrapper myboard --mill-diameters=0.169
 
 Orchestrates the full workflow:
 1. Runs `pcb2gcode` three times (with `--back`, and `--drill`, and `--outline`)
-2. Auto-calculates x-offset from Edge_Cuts.gbr board dimensions
+2. Auto-calculates x-offset from `Edge_Cuts.gbr` board dimensions
 3. Runs `pcb2gcode-fixup` on each output file
 4. Runs `pcb2gcode-combine` to merge drill/milldrill/outline
 
@@ -52,9 +52,9 @@ pcb2gcode-wrapper myboard --no-combine  # keep files separate
 
 ### pcb2gcode-fixup
 
-Post-processes G-code for CNC compatibility:
+Post-processes G-code for CNC compatibility and safety:
 - Filters unsupported commands (G64, G94)
-- Removes M6 tool change sequences (--remove-m6)
+- Removes M6 tool change sequences (`--remove-m6`)
 - Swaps initial Z/XY moves for safety (moves to XY position before plunging)
 
 ```bash
@@ -77,11 +77,11 @@ Features:
 - Validates tool sizes match across all files
 - Safe Z-height transitions between operations
 - Preserves spindle speed changes with proper dwell times
-- Extracts safe Z height from source files (not hardcoded)
+- Extracts safe Z height from source files
 
-## millproject Configuration
+## `millproject` configuration
 
-Create a `millproject` file in your Gerber directory:
+Create a `millproject` file in your Gerber directory for `pcb2gcode`:
 
 ```ini
 metric=true
@@ -124,7 +124,7 @@ Key settings:
 - `nom6=1` - Prevents M6 commands that trip up some controllers
 - `nog81=1` - Uses G0/G1 instead of canned drill cycles
 - `zsafe` - Travel height; start high (20mm), lower once confident
-- `zwork` - Milling depth; start shallow (-0.05), adjust as needed
+- `zwork` - Milling depth; start shallow (e.g., -0.05), adjust as needed
 
 ## Requirements
 
