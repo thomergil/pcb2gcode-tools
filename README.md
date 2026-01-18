@@ -22,7 +22,7 @@ pcb2gcode-wrapper myboard --mill-diameters=0.169
 
 # Output:
 #   myboard_00_back.ngc      - back copper traces
-#   myboard_01_combined.ngc  - drill + milldrill + outline (combined)
+#   myboard_01_drill.ngc     - drill + milldrill + outline (combined)
 ```
 
 ## Tools

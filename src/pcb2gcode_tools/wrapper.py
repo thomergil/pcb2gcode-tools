@@ -259,7 +259,7 @@ The --x-offset parameter is automatically calculated from edge cuts if present.
             drill_file = f"{prefix}{basename}_drill{suffix}"
             milldrill_file = f"{prefix}{basename}_milldrill{suffix}"
             outline_file = f"{prefix}{basename}_outline{suffix}"
-            combined_file = f"{prefix}{basename}_01_combined.ngc"
+            combined_file = f"{prefix}{basename}_01_drill.ngc"
 
             # Check which files exist
             input_files = [f for f in [drill_file, milldrill_file, outline_file] if os.path.exists(f)]
