@@ -142,6 +142,7 @@ def parse_gcode_file(filepath):
     spindle_speed = None
     feedrate = None
     safe_z = None  # Must be extracted from file
+    tool_change_z = None  # Tool change height (e.g., Z35)
     saw_m3 = False
     tool_size = None
 
@@ -166,6 +167,7 @@ def parse_gcode_file(filepath):
             # Header ends when we see retract to tool change height
             z = get_z_from_line(parsed)
             if is_tool_change_height(z):
+                tool_change_z = z
                 state = STATE_TOOL_CHANGE
                 tool_change.append(raw_line)
                 continue
@@ -244,6 +246,7 @@ def parse_gcode_file(filepath):
         'spindle_speed': spindle_speed,
         'feedrate': feedrate,
         'safe_z': safe_z,
+        'tool_change_z': tool_change_z,
         'tool_size': tool_size,
     }
 
@@ -299,6 +302,12 @@ def combine_gcode_files(input_files, output_file):
         return False
     print(f"Safe Z height: {safe_z}mm (from {os.path.basename(parsed_files[0]['filepath'])})")
 
+    # Use tool change height for safety retracts (higher is safer)
+    tool_change_z = parsed_files[0]['tool_change_z']
+    if tool_change_z is None:
+        tool_change_z = TOOL_CHANGE_HEIGHT_MIN  # Fallback to 30mm
+    print(f"Tool change Z height: {tool_change_z}mm")
+
     output_lines = []
 
     # Add header from first file
@@ -334,10 +343,11 @@ def combine_gcode_files(input_files, output_file):
         ops = parsed['operations']
         if ops:
             # Check if operations start with a safe positioning move
+            # Use tool_change_z (e.g., Z35) so this is harmless after M0 tool change
             first_parsed = Line(ops[0])
             z = get_z_from_line(first_parsed)
             if not is_rapid_move(first_parsed) or z is None:
-                output_lines.append(f"G00 Z{safe_z:.5f} {COMMENT_SAFETY_RETRACT}\n")
+                output_lines.append(f"G00 Z{tool_change_z:.5f} {COMMENT_SAFETY_RETRACT}\n")
 
             output_lines.extend(ops)
 
