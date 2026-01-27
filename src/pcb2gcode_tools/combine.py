@@ -31,6 +31,7 @@ COMMENT_SECTION = "( === Operations from {} === )"
 COMMENT_RETRACT_BEFORE = "( retract before next operation set )"
 COMMENT_RETRACT_AFTER = "( retract after operations )"
 COMMENT_SAFETY_RETRACT = "( safety retract )"
+COMMENT_DWELL_SYNC = "( dwell to ensure Z complete before XY )"
 COMMENT_SPINDLE_SPEED = "( spindle speed for {} )"
 COMMENT_FEEDRATE = "( feedrate for {} )"
 
@@ -348,6 +349,7 @@ def combine_gcode_files(input_files, output_file):
             z = get_z_from_line(first_parsed)
             if not is_rapid_move(first_parsed) or z is None:
                 output_lines.append(f"G00 Z{tool_change_z:.5f} {COMMENT_SAFETY_RETRACT}\n")
+                output_lines.append(f"G4 P0 {COMMENT_DWELL_SYNC}\n")
 
             output_lines.extend(ops)
 
