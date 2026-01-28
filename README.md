@@ -9,10 +9,10 @@ brew install pipx    # if not already installed
 pipx install git+https://github.com/thomergil/pcb2gcode-tools
 ```
 
-This installs three commands:
+This installs the following commands:
 - `pcb2gcode-wrapper` - Runs `pcb2gcode` with automatic offset calculation
 - `pcb2gcode-fixup` - Post-processes G-code for compatibility and safety
-- `pcb2gcode-combine` - Combines multiple G-code files into one
+- `pcb2gcode-combine` - Combines multiple G-code files into one (with `--multi` for tool changes)
 
 ## Quick Start
 
@@ -23,6 +23,10 @@ pcb2gcode-wrapper myboard --mill-diameters=0.169
 # Output:
 #   myboard_00_back.ngc      - back copper traces
 #   myboard_01_drill.ngc     - drill + milldrill + outline (combined)
+
+# With --multi flag, also creates:
+pcb2gcode-wrapper myboard --mill-diameters=0.169 --multi
+#   myboard_000_all.ngc      - all operations with tool changes (sorts first)
 ```
 
 ## Tools
@@ -42,6 +46,7 @@ Options:
   --x-margin MM      X margin for offset calculation (default: 5)
   --y-margin MM      Y margin for y-offset (default: 3)
   --no-combine       Skip combining drill/milldrill/outline
+  --multi            Also create all-in-one file with tool changes
   --output-dir DIR   Output directory for generated files
 
 # Examples:
@@ -67,17 +72,33 @@ Options:
 
 ### pcb2gcode-combine
 
-Combines multiple G-code files into one when they use the same bit:
+Combines multiple G-code files into one:
 
 ```bash
+# Same tool (validates tool sizes match)
 pcb2gcode-combine drill.ngc milldrill.ngc outline.ngc -o combined.ngc
+
+# Multiple tools (inserts M6 tool change sequences)
+pcb2gcode-combine --multi back.ngc drill.ngc -o all.ngc
 ```
 
-Features:
+**Safety features (defense in depth):**
+- **Unit validation** - Refuses to combine files with mismatched units (mm vs inches)
+- **Dangerous command detection** - Refuses files containing G28/G30 (home commands that may crash)
+- **Spindle speed validation** - Warns about missing or suspicious spindle speeds
+- **Explicit state header** - Adds G90 G21 G17 G94 to establish known machine state
+- **Safe Z transitions** - Ensures safe height between all operations
+- **Absolute mode enforcement** - Adds G90 before each operation set
+
+**Same-tool mode (default):**
 - Validates tool sizes match across all files
-- Safe Z-height transitions between operations
 - Preserves spindle speed changes with proper dwell times
-- Extracts safe Z height from source files
+
+**Multi-tool mode (`--multi`):**
+- Files may use different tool sizes
+- First tool starts immediately (no pause)
+- Subsequent tools get full M6 tool change: retract, M5, MSG, M6, M3
+- Tool descriptions auto-detected from file comments and filenames
 
 ## `millproject` configuration
 

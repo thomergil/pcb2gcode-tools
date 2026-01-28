@@ -378,6 +378,108 @@ def remove_tiny_segments(infile, outfile, min_length=DEFAULT_MIN_SEGMENT_LENGTH)
     return segments_removed
 
 
+def fix_full_circle_arcs(infile, outfile):
+    """
+    Ensure all G2/G3 arc commands have explicit X and Y coordinates.
+
+    Some G-code senders (including those that re-parse and regenerate G-code)
+    may omit X/Y when they match the current position. This breaks full-circle
+    arcs (like milldrilling helical arcs) on GRBL, which requires explicit
+    endpoint coordinates even for full circles. GRBL returns error:33 otherwise.
+
+    This function tracks the current X/Y position and adds explicit coordinates
+    to any G2/G3 command that's missing them.
+
+    Args:
+        infile (str): Path to input G-code file
+        outfile (str): Path to output G-code file
+
+    Returns:
+        int: Number of arc commands fixed
+    """
+    with open(infile, "r") as f:
+        lines = f.readlines()
+
+    new_lines = []
+    arcs_fixed = 0
+
+    # Track current position
+    current_x = None
+    current_y = None
+
+    # Regex patterns
+    # Match G0/G00/G1/G01 with X and/or Y to track position
+    move_pattern = re.compile(r"G0?[01]\s", re.IGNORECASE)
+    x_pattern = re.compile(r"X\s*(-?[0-9.]+)", re.IGNORECASE)
+    y_pattern = re.compile(r"Y\s*(-?[0-9.]+)", re.IGNORECASE)
+    # Match G2/G02/G3/G03 arc commands
+    arc_pattern = re.compile(r"^(G0?[23])\s", re.IGNORECASE)
+
+    for line in lines:
+        line_stripped = line.strip()
+
+        # Skip comments and empty lines
+        if not line_stripped or line_stripped.startswith("("):
+            new_lines.append(line)
+            continue
+
+        # Remove inline comments for parsing
+        code_part = line_stripped
+        comment_idx = code_part.find("(")
+        if comment_idx > 0:
+            code_part = code_part[:comment_idx].strip()
+
+        # Update current position from any move command
+        if move_pattern.match(code_part) or arc_pattern.match(code_part):
+            x_match = x_pattern.search(code_part)
+            y_match = y_pattern.search(code_part)
+            if x_match:
+                current_x = float(x_match.group(1))
+            if y_match:
+                current_y = float(y_match.group(1))
+
+        # Check if this is an arc command
+        arc_match = arc_pattern.match(code_part)
+        if arc_match:
+            has_x = x_pattern.search(code_part) is not None
+            has_y = y_pattern.search(code_part) is not None
+
+            # If missing X or Y and we know the current position, add them
+            if (not has_x or not has_y) and current_x is not None and current_y is not None:
+                # Find where to insert the coordinates (after G2/G3)
+                arc_cmd = arc_match.group(1)
+                rest_of_line = code_part[len(arc_cmd):].lstrip()
+
+                # Build the fixed line
+                coords = ""
+                if not has_x:
+                    coords += f"X{current_x:.3f} "
+                if not has_y:
+                    coords += f"Y{current_y:.3f} "
+
+                # Reconstruct line preserving original comment if any
+                comment_part = ""
+                if comment_idx > 0:
+                    comment_part = " " + line_stripped[comment_idx:]
+
+                new_line = f"{arc_cmd} {coords}{rest_of_line}{comment_part}\n"
+                new_lines.append(new_line)
+                arcs_fixed += 1
+                continue
+
+        new_lines.append(line)
+
+    with open(outfile, "w") as f:
+        f.writelines(new_lines)
+
+    if arcs_fixed > 0:
+        print(f"Fixed {arcs_fixed} arc command(s) with missing X/Y coordinates. G-code saved to {outfile}")
+    else:
+        print(f"No arc commands needed fixing. G-code copied to {outfile}")
+
+    return arcs_fixed
+
+
 def main():
     """
     Main function to process command line arguments and execute G-code modifications.
@@ -431,6 +533,9 @@ def main():
         if args.min_segment_length > 0:
             print(f"Processing: Removing tiny segments (<{args.min_segment_length}mm)...")
             remove_tiny_segments(current_file, args.outfile, args.min_segment_length)
+
+        print("Processing: Fixing full-circle arc commands...")
+        fix_full_circle_arcs(current_file, args.outfile)
 
         print("Processing: Swapping Z and X,Y moves...")
         swap_z_and_xy_moves(current_file, args.outfile)

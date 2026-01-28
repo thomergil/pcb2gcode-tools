@@ -2,268 +2,113 @@
 """
 pcb2gcode-combine
 
-Combines multiple G-code files (drill, milldrill, outline) into a single file.
-Only safe when all files use the same tool/bit size.
+Combines multiple G-code files into a single file with proper safety transitions.
 
-Ensures safe Z-height transitions between operations to prevent scratching
-or breaking the bit.
+Modes:
+  - Default (same tool): All files must use the same tool size. Operations are
+    concatenated with safe Z transitions between them.
+  - Multi-tool (--multi): Files may use different tools. Proper M6 tool change
+    sequences are inserted between files, prompting the operator to change bits.
+
+Safety features:
+  - Validates units consistency (refuses to combine mm with inches)
+  - Detects dangerous commands (G28, G30)
+  - Validates spindle speeds
+  - Adds explicit state header (G90 G21 G17 G94) for defense in depth
+  - Ensures safe Z transitions between all operations
 """
 
 import argparse
 import os
-import re
 import sys
-from pygcode import Line, GCodeRapidMove, GCodeLinearMove, GCodeSpindleSpeed, \
-    GCodeFeedRate, GCodeStartSpindleCW, GCodeStopSpindle
 
-# Z height detection threshold (mm) - only used to identify tool change retracts
-# which signal end of header section. Actual safe_z is extracted from source files.
-TOOL_CHANGE_HEIGHT_MIN = 30.0  # Z >= this indicates tool change retract
-
-# Parser states
-STATE_HEADER = 'header'
-STATE_TOOL_CHANGE = 'tool_change'
-STATE_OPERATIONS = 'operations'
-STATE_FOOTER = 'footer'
-
-# G-code comment templates
-COMMENT_SECTION = "( === Operations from {} === )"
-COMMENT_RETRACT_BEFORE = "( retract before next operation set )"
-COMMENT_RETRACT_AFTER = "( retract after operations )"
-COMMENT_SAFETY_RETRACT = "( safety retract )"
-COMMENT_DWELL_SYNC = "( dwell to ensure Z complete before XY )"
-COMMENT_SPINDLE_SPEED = "( spindle speed for {} )"
-COMMENT_FEEDRATE = "( feedrate for {} )"
-
-# Tool size patterns in comments
-TOOL_SIZE_PATTERNS = [
-    r'drill size\s+([0-9.]+)\s*mm',
-    r'cutter diameter\s+([0-9.]+)\s*mm',
-    r'mill head of\s+([0-9.]+)\s*mm',
-    r'Bit sizes:\s*\[([0-9.]+)mm\]',
-]
-
-
-def is_tool_change_height(z):
-    """Check if Z is at tool change height."""
-    return z is not None and z >= TOOL_CHANGE_HEIGHT_MIN
+from .gcode_utils import (
+    # Parsing
+    parse_gcode_file,
+    Line,
+    GCodeSpindleSpeed,
+    # Validation
+    validate_files_for_combining,
+    get_safe_z_from_files,
+    get_tool_change_z_from_files,
+    # Helpers
+    get_z_from_line,
+    is_rapid_move,
+    # Constants
+    DEFAULT_TOOL_CHANGE_Z,
+    DEFAULT_SPINDLE_DWELL,
+    COMMENT_SECTION,
+    COMMENT_RETRACT_BEFORE,
+    COMMENT_RETRACT_AFTER,
+    COMMENT_SAFETY_RETRACT,
+    COMMENT_DWELL_SYNC,
+    COMMENT_SPINDLE_SPEED,
+    COMMENT_FEEDRATE,
+    # Defense in depth
+    generate_state_header,
+    filter_header_redundant_commands,
+    strip_leading_dwells,
+)
 
 
-def is_safe_height(z):
-    """Check if Z is positive but below tool change height (working safe height)."""
-    return z is not None and 0 < z < TOOL_CHANGE_HEIGHT_MIN
-
-
-def get_z_from_line(line):
-    """Extract Z value from a parsed line, if present."""
-    for gc in line.gcodes:
-        if isinstance(gc, (GCodeRapidMove, GCodeLinearMove)):
-            if gc.Z is not None:
-                return gc.Z
-    return None
-
-
-def get_spindle_speed(line):
-    """Extract spindle speed from a parsed line, if present."""
-    for gc in line.gcodes:
-        if isinstance(gc, GCodeSpindleSpeed):
-            return int(gc.word.value)
-    return None
-
-
-def get_feedrate(line):
-    """Extract feedrate from a parsed line, if present."""
-    for gc in line.gcodes:
-        if isinstance(gc, GCodeFeedRate):
-            return float(gc.word.value)
-    return None
-
-
-def has_spindle_on(line):
-    """Check if line has M3 (spindle on clockwise)."""
-    for gc in line.gcodes:
-        if isinstance(gc, GCodeStartSpindleCW):
-            return True
-    return False
-
-
-def has_spindle_off(line):
-    """Check if line has M5 (spindle stop)."""
-    for gc in line.gcodes:
-        if isinstance(gc, GCodeStopSpindle):
-            return True
-    return False
-
-
-def is_rapid_move(line):
-    """Check if line is a G0 rapid move."""
-    for gc in line.gcodes:
-        if isinstance(gc, GCodeRapidMove):
-            return True
-    return False
-
-
-def extract_tool_size(parsed_line):
-    """Extract tool/bit size from a parsed G-code line's comment."""
-    if not parsed_line.comment:
-        return None
-
-    comment_text = parsed_line.comment.text
-    for pattern in TOOL_SIZE_PATTERNS:
-        m = re.search(pattern, comment_text, re.IGNORECASE)
-        if m:
-            return float(m.group(1))
-    return None
-
-
-def parse_gcode_file(filepath):
+def generate_tool_change_sequence(tool_number, tool_size, tool_type, spindle_speed,
+                                   tool_change_z=DEFAULT_TOOL_CHANGE_Z,
+                                   dwell_time=DEFAULT_SPINDLE_DWELL,
+                                   is_first_tool=False):
     """
-    Parse a G-code file into sections using pygcode.
+    Generate a tool change sequence for multi-tool mode.
 
-    Returns:
-        dict with keys:
-            - header: list of raw lines
-            - tool_change: list of raw lines
-            - operations: list of raw lines
-            - footer: list of raw lines
-            - spindle_speed: int or None
-            - feedrate: float or None
-            - safe_z: float (working safe height)
-            - tool_size: float in mm or None
+    Args:
+        is_first_tool: If True, skip M6 pause (operator already loaded first tool)
+
+    Returns list of G-code lines for tool change.
     """
-    with open(filepath, 'r') as f:
-        raw_lines = f.readlines()
+    lines = []
 
-    header = []
-    tool_change = []
-    operations = []
-    footer = []
+    if is_first_tool:
+        # First tool: explicit spindle speed (header S commands are filtered out)
+        if spindle_speed:
+            lines.append(f"G00 S{spindle_speed}     (RPM spindle speed.)\n")
+        lines.append("M3      (Spindle on clockwise.)\n")
+        lines.append(f"G04 P{dwell_time:.5f} (Wait for spindle to get up to speed)\n")
+    else:
+        # Subsequent tools: full tool change sequence
+        lines.append(f"G00 Z{tool_change_z:.5f} (Retract)\n")
+        lines.append(f"T{tool_number}\n")
+        lines.append("M5      (Spindle stop.)\n")
+        lines.append(f"G04 P{dwell_time:.5f}\n")
 
-    state = STATE_HEADER
-    spindle_speed = None
-    feedrate = None
-    safe_z = None  # Must be extracted from file
-    tool_change_z = None  # Tool change height (e.g., Z35)
-    saw_m3 = False
-    tool_size = None
+        # Message about tool change
+        if tool_size:
+            lines.append(f"(MSG, Change tool bit to {tool_type} size {tool_size}mm)\n")
+        else:
+            lines.append(f"(MSG, Change tool bit to {tool_type})\n")
 
-    for i, raw_line in enumerate(raw_lines):
-        parsed = Line(raw_line)
+        lines.append("M6      (Tool change.)\n")
 
-        # Extract tool size from any comment
-        if tool_size is None:
-            tool_size = extract_tool_size(parsed)
+        if spindle_speed:
+            lines.append(f"G00 S{spindle_speed}     (RPM spindle speed.)\n")
+        lines.append("M3      (Spindle on clockwise.)\n")
 
-        if state == STATE_HEADER:
-            # Extract spindle speed from header
-            s = get_spindle_speed(parsed)
-            if s is not None:
-                spindle_speed = s
-
-            # Extract feedrate
-            f = get_feedrate(parsed)
-            if f is not None:
-                feedrate = f
-
-            # Header ends when we see retract to tool change height
-            z = get_z_from_line(parsed)
-            if is_tool_change_height(z):
-                tool_change_z = z
-                state = STATE_TOOL_CHANGE
-                tool_change.append(raw_line)
-                continue
-
-            # For millready files (no tool change), M3 signals end of header
-            if has_spindle_on(parsed):
-                state = STATE_TOOL_CHANGE
-                saw_m3 = True  # M3 was just seen
-                tool_change.append(raw_line)
-                continue
-
-            header.append(raw_line)
-
-        elif state == STATE_TOOL_CHANGE:
-            # Track M3 (spindle on)
-            if has_spindle_on(parsed):
-                saw_m3 = True
-                tool_change.append(raw_line)
-                continue
-
-            # After M3, everything goes to operations (including G04 dwell)
-            if saw_m3:
-                state = STATE_OPERATIONS
-                operations.append(raw_line)
-                # Extract safe_z if this is a safe Z move
-                z = get_z_from_line(parsed)
-                if z is not None and is_safe_height(z):
-                    safe_z = z
-                continue
-
-            tool_change.append(raw_line)
-
-        elif state == STATE_OPERATIONS:
-            # Extract safe_z from first positive Z rapid move if not yet found
-            if safe_z is None:
-                z = get_z_from_line(parsed)
-                if z is not None and is_safe_height(z):
-                    safe_z = z
-
-            # Extract feedrate from operations if not found in header
-            if feedrate is None:
-                f = get_feedrate(parsed)
-                if f is not None:
-                    feedrate = f
-
-            # Footer starts at "All done" comment or final high Z retract before M5
-            if parsed.comment and 'All done' in parsed.comment.text:
-                state = STATE_FOOTER
-                footer.append(raw_line)
-                continue
-
-            # Check for final retract (high Z followed soon by M5)
-            z = get_z_from_line(parsed)
-            if is_tool_change_height(z):
-                # Look ahead for M5
-                for j in range(i + 1, min(i + 5, len(raw_lines))):
-                    future_parsed = Line(raw_lines[j])
-                    if has_spindle_off(future_parsed):
-                        state = STATE_FOOTER
-                        footer.append(raw_line)
-                        break
-                if state == STATE_FOOTER:
-                    continue
-
-            operations.append(raw_line)
-
-        elif state == STATE_FOOTER:
-            footer.append(raw_line)
-
-    return {
-        'header': header,
-        'tool_change': tool_change,
-        'operations': operations,
-        'footer': footer,
-        'filepath': filepath,
-        'spindle_speed': spindle_speed,
-        'feedrate': feedrate,
-        'safe_z': safe_z,
-        'tool_change_z': tool_change_z,
-        'tool_size': tool_size,
-    }
+    return lines
 
 
-def combine_gcode_files(input_files, output_file):
+def combine_files(input_files, output_file, multi_tool=False):
     """
     Combine multiple G-code files into one.
 
-    Uses header and tool change from first file.
-    Adds operations from all files with safe Z transitions.
-    Uses footer from last file.
+    Args:
+        input_files: List of input file paths
+        output_file: Output file path
+        multi_tool: If True, allow different tools and insert M6 sequences
+
+    Returns True on success, False on failure.
     """
     if len(input_files) < 2:
         print("Error: Need at least 2 files to combine.", file=sys.stderr)
         return False
 
+    # Parse all files
     parsed_files = []
     for filepath in input_files:
         if not os.path.exists(filepath):
@@ -275,89 +120,142 @@ def combine_gcode_files(input_files, output_file):
         print(f"Parsed {os.path.basename(filepath)}: "
               f"{len(parsed['operations'])} ops, "
               f"S{parsed['spindle_speed']}, F{parsed['feedrate']}, "
-              f"tool={tool_str}")
+              f"tool={tool_str}" +
+              (f", type={parsed['tool_type']}" if multi_tool else ""))
 
-    # Validate tool sizes match
-    tool_sizes = [p['tool_size'] for p in parsed_files]
-    known_sizes = [s for s in tool_sizes if s is not None]
+    # Validate files
+    is_valid, errors, warnings = validate_files_for_combining(
+        parsed_files,
+        require_same_tool=not multi_tool
+    )
 
-    if known_sizes:
-        unique_sizes = set(known_sizes)
-        if len(unique_sizes) > 1:
-            print(f"\nERROR: Tool sizes don't match!", file=sys.stderr)
-            for p in parsed_files:
-                size = p['tool_size']
-                print(f"  {os.path.basename(p['filepath'])}: {size}mm" if size
-                      else f"  {os.path.basename(p['filepath'])}: unknown", file=sys.stderr)
-            print("\nCombining files with different tool sizes is dangerous!", file=sys.stderr)
-            return False
-        print(f"Tool size: {known_sizes[0]}mm (verified across all files)")
-    else:
-        print("Warning: Could not determine tool sizes from any file")
+    # Print warnings
+    for warning in warnings:
+        print(warning, file=sys.stderr)
 
-    # Use safe Z height from first file (must be present)
-    safe_z = parsed_files[0]['safe_z']
-    if safe_z is None:
-        print("ERROR: Could not determine safe Z height from first file!", file=sys.stderr)
-        print("The file format may not be supported.", file=sys.stderr)
+    # If validation failed, print errors and abort
+    if not is_valid:
+        print("\n" + "=" * 60, file=sys.stderr)
+        print("CANNOT COMBINE FILES - SAFETY VALIDATION FAILED", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        for error in errors:
+            print(error, file=sys.stderr)
+        print("\nAborting to prevent potentially dangerous G-code.", file=sys.stderr)
         return False
-    print(f"Safe Z height: {safe_z}mm (from {os.path.basename(parsed_files[0]['filepath'])})")
 
-    # Use tool change height for safety retracts (higher is safer)
-    tool_change_z = parsed_files[0]['tool_change_z']
-    if tool_change_z is None:
-        tool_change_z = TOOL_CHANGE_HEIGHT_MIN  # Fallback to 30mm
+    # Get safe heights
+    safe_z = get_safe_z_from_files(parsed_files)
+    tool_change_z = get_tool_change_z_from_files(parsed_files)
+    print(f"Safe Z height: {safe_z}mm")
     print(f"Tool change Z height: {tool_change_z}mm")
 
+    # Report spindle speed differences in multi-tool mode
+    if multi_tool:
+        spindle_speeds = [(os.path.basename(p['filepath']), p['spindle_speed']) for p in parsed_files]
+        unique_speeds = set(s for _, s in spindle_speeds if s is not None)
+        if len(unique_speeds) > 1:
+            print(f"\nNote: Files have different spindle speeds:")
+            for name, speed in spindle_speeds:
+                print(f"  {name}: S{speed}")
+            print("Each tool will use its own spindle speed.\n")
+    else:
+        # Same-tool mode: report tool size if known
+        tool_sizes = [p['tool_size'] for p in parsed_files]
+        known_sizes = [s for s in tool_sizes if s is not None]
+        if known_sizes:
+            print(f"Tool size: {known_sizes[0]}mm (verified across all files)")
+
+    # Build output
     output_lines = []
 
-    # Add header from first file
-    output_lines.extend(parsed_files[0]['header'])
+    # Add explicit state header (defense in depth)
+    output_lines.append(f"( pcb2gcode-combine {'multi-tool' if multi_tool else 'same-tool'} output )\n")
+    output_lines.extend(generate_state_header())
 
-    # Add tool change from first file
-    output_lines.extend(parsed_files[0]['tool_change'])
+    # Add filtered header from first file
+    # In multi-tool mode, filter S commands (we set them per tool)
+    # In same-tool mode, keep S commands (header S applies to all operations)
+    header = filter_header_redundant_commands(parsed_files[0]['header'], filter_spindle_speed=multi_tool)
+    output_lines.extend(header)
 
-    # Add operations from each file with safe transitions
-    for i, parsed in enumerate(parsed_files):
-        basename = os.path.basename(parsed['filepath'])
+    if multi_tool:
+        # Multi-tool mode: insert tool change sequences
+        for i, parsed in enumerate(parsed_files):
+            basename = os.path.basename(parsed['filepath'])
+            tool_number = i + 1
 
-        # Add comment indicating which file's operations follow
-        output_lines.append(f"\n{COMMENT_SECTION.format(basename)}\n")
+            # Generate tool change sequence
+            tc_lines = generate_tool_change_sequence(
+                tool_number=tool_number,
+                tool_size=parsed['tool_size'],
+                tool_type=parsed['tool_type'],
+                spindle_speed=parsed['spindle_speed'],
+                tool_change_z=tool_change_z,
+                is_first_tool=(i == 0),
+            )
 
-        # If not the first file, ensure we're at safe height before starting
-        if i > 0:
-            output_lines.append(f"G00 Z{safe_z:.5f} {COMMENT_RETRACT_BEFORE}\n")
+            output_lines.append(f"\n( === Tool {tool_number}: {basename} === )\n")
+            output_lines.extend(tc_lines)
 
-        # Set spindle speed if different from previous file
-        current_speed = parsed['spindle_speed']
-        prev_speed = parsed_files[i - 1]['spindle_speed'] if i > 0 else current_speed
-        if current_speed and current_speed != prev_speed:
-            output_lines.append(f"S{current_speed} {COMMENT_SPINDLE_SPEED.format(basename)}\n")
+            # Defense in depth: ensure absolute mode before operations
+            output_lines.append("G90        ( Ensure absolute mode before operations )\n")
 
-        # Set feedrate if different from previous file
-        current_feedrate = parsed['feedrate']
-        prev_feedrate = parsed_files[i - 1]['feedrate'] if i > 0 else current_feedrate
-        if current_feedrate and i > 0 and current_feedrate != prev_feedrate:
-            output_lines.append(f"G01 F{current_feedrate:.5f} {COMMENT_FEEDRATE.format(basename)}\n")
+            # Add operations (strip leading dwells - we generate our own)
+            ops = strip_leading_dwells(parsed['operations'])
+            if ops:
+                output_lines.extend(ops)
 
-        # Add operations
-        ops = parsed['operations']
-        if ops:
-            # Check if operations start with a safe positioning move
-            # Use tool_change_z (e.g., Z35) so this is harmless after M0 tool change
-            first_parsed = Line(ops[0])
-            z = get_z_from_line(first_parsed)
-            if not is_rapid_move(first_parsed) or z is None:
-                output_lines.append(f"G00 Z{tool_change_z:.5f} {COMMENT_SAFETY_RETRACT}\n")
-                output_lines.append(f"G4 P0 {COMMENT_DWELL_SYNC}\n")
+                # Ensure we end at safe height
+                last_parsed = Line(ops[-1])
+                z = get_z_from_line(last_parsed)
+                if z is None or z < 0:
+                    output_lines.append(f"G00 Z{safe_z:.5f} {COMMENT_RETRACT_AFTER}\n")
+    else:
+        # Same-tool mode: use original tool change from first file, concatenate operations
+        output_lines.extend(parsed_files[0]['tool_change'])
 
-            output_lines.extend(ops)
+        for i, parsed in enumerate(parsed_files):
+            basename = os.path.basename(parsed['filepath'])
 
-            # Ensure we end at safe height before next file
-            last_parsed = Line(ops[-1])
-            z = get_z_from_line(last_parsed)
-            if z is None or z < 0:
-                output_lines.append(f"G00 Z{safe_z:.5f} {COMMENT_RETRACT_AFTER}\n")
+            # Add section comment
+            output_lines.append(f"\n{COMMENT_SECTION.format(basename)}\n")
+
+            # Defense in depth: ensure absolute mode
+            output_lines.append("G90        ( Ensure absolute mode before operations )\n")
+
+            # If not the first file, ensure we're at safe height
+            if i > 0:
+                output_lines.append(f"G00 Z{safe_z:.5f} {COMMENT_RETRACT_BEFORE}\n")
+
+            # Set spindle speed if different from previous file
+            current_speed = parsed['spindle_speed']
+            prev_speed = parsed_files[i - 1]['spindle_speed'] if i > 0 else current_speed
+            if current_speed and current_speed != prev_speed:
+                output_lines.append(f"S{current_speed} {COMMENT_SPINDLE_SPEED.format(basename)}\n")
+
+            # Set feedrate if different from previous file
+            current_feedrate = parsed['feedrate']
+            prev_feedrate = parsed_files[i - 1]['feedrate'] if i > 0 else current_feedrate
+            if current_feedrate and i > 0 and current_feedrate != prev_feedrate:
+                output_lines.append(f"G01 F{current_feedrate:.5f} {COMMENT_FEEDRATE.format(basename)}\n")
+
+            # Add operations
+            ops = parsed['operations']
+            if ops:
+                # Check if operations start with a safe positioning move
+                first_parsed = Line(ops[0])
+                z = get_z_from_line(first_parsed)
+                if not is_rapid_move(first_parsed) or z is None:
+                    output_lines.append(f"G00 Z{tool_change_z:.5f} {COMMENT_SAFETY_RETRACT}\n")
+                    output_lines.append(f"G4 P0 {COMMENT_DWELL_SYNC}\n")
+
+                output_lines.extend(ops)
+
+                # Ensure we end at safe height
+                last_parsed = Line(ops[-1])
+                z = get_z_from_line(last_parsed)
+                if z is None or z < 0:
+                    output_lines.append(f"G00 Z{safe_z:.5f} {COMMENT_RETRACT_AFTER}\n")
 
     # Add footer from last file
     output_lines.extend(parsed_files[-1]['footer'])
@@ -367,7 +265,10 @@ def combine_gcode_files(input_files, output_file):
         f.writelines(output_lines)
 
     total_ops = sum(len(p['operations']) for p in parsed_files)
-    print(f"\nCombined {len(input_files)} files into {output_file}")
+    if multi_tool:
+        print(f"\nCombined {len(input_files)} files with {len(input_files)} tool changes into {output_file}")
+    else:
+        print(f"\nCombined {len(input_files)} files into {output_file}")
     print(f"Total operation lines: {total_ops}")
 
     return True
@@ -378,8 +279,14 @@ def main():
         description="""
         Combine multiple pcb2gcode G-code files into a single file.
 
-        Use this when drill, milldrill, and outline all use the same bit size.
-        The script ensures safe Z-height transitions between operations.
+        By default, all files must use the same tool size (safe for single-bit workflows).
+        Use --multi to allow different tools with M6 tool change pauses.
+
+        Safety features:
+        - Validates unit consistency (refuses mm + inches)
+        - Detects dangerous G28/G30 commands
+        - Adds explicit state header (G90 G21 G17 G94)
+        - Ensures safe Z transitions between operations
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -388,6 +295,8 @@ def main():
                         help="Input G-code files to combine (in order)")
     parser.add_argument("-o", "--output", required=True,
                         help="Output combined G-code file")
+    parser.add_argument("--multi", action="store_true",
+                        help="Allow different tools with M6 tool change sequences")
 
     args = parser.parse_args()
 
@@ -395,7 +304,7 @@ def main():
         print("Error: Need at least 2 input files to combine.", file=sys.stderr)
         sys.exit(1)
 
-    success = combine_gcode_files(args.input_files, args.output)
+    success = combine_files(args.input_files, args.output, multi_tool=args.multi)
     sys.exit(0 if success else 1)
 
 
