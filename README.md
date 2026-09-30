@@ -112,7 +112,7 @@ metricoutput=true
 zwork=-0.10
 zsafe=20
 zchange=35
-mill-feed=800
+mill-feed=600
 mill-speed=12000
 nom6=1
 spinup-time=3.0
@@ -125,7 +125,7 @@ voronoi=1
 # drilling
 zdrill=-1.7
 zmilldrill=-1.7
-drill-feed=300
+drill-feed=200
 drill-speed=14000
 nog81=1
 drills-available=1.0
