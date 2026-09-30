@@ -18,14 +18,14 @@ This installs the following commands:
 
 ```bash
 # From your KiCad export directory containing .gbr and .drl files:
-pcb2gcode-wrapper myboard --mill-diameters=0.19
+pcb2gcode-wrapper myboard --mill-diameters=0.15
 
 # Output:
 #   myboard_00_back.ngc      - back copper traces
 #   myboard_01_drill.ngc     - drill + milldrill + outline (combined)
 
 # With --multi flag, also creates:
-pcb2gcode-wrapper myboard --mill-diameters=0.19 --multi
+pcb2gcode-wrapper myboard --mill-diameters=0.15 --multi
 #   myboard_000_all.ngc      - all operations with tool changes (sorts first)
 ```
 
@@ -50,7 +50,7 @@ Options:
   --output-dir DIR   Output directory for generated files
 
 # Examples:
-pcb2gcode-wrapper myboard --mill-diameters=0.19
+pcb2gcode-wrapper myboard --mill-diameters=0.15
 pcb2gcode-wrapper myboard --output-dir ./output --x-margin 10
 pcb2gcode-wrapper myboard --no-combine  # keep files separate
 ```
@@ -109,7 +109,7 @@ metric=true
 metricoutput=true
 
 # milling
-zwork=-0.17
+zwork=-0.10
 zsafe=20
 zchange=35
 mill-feed=800
@@ -146,8 +146,8 @@ Key settings:
 - `nom6=1` - Prevents M6 commands that trip up some controllers
 - `nog81=1` - Uses G0/G1 instead of canned drill cycles
 - `zsafe` - Travel height; start high (20mm), lower once confident
-- `zwork` - Milling depth; -0.17 works with a 30° V-bit with a 0.1mm tip
-- `--mill-diameters` - Cut width at `zwork`; for that bit, 0.1 + 2 × 0.17 × tan(15°) ≈ 0.19
+- `zwork` - Milling depth; start at -0.10 with a 30° V-bit with a 0.1mm tip
+- `--mill-diameters` - Cut width at `zwork`; for that bit, 0.1 + 2 × 0.10 × tan(15°) ≈ 0.15
 
 ## Requirements
 
