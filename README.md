@@ -18,14 +18,14 @@ This installs the following commands:
 
 ```bash
 # From your KiCad export directory containing .gbr and .drl files:
-pcb2gcode-wrapper myboard --mill-diameters=0.169
+pcb2gcode-wrapper myboard --mill-diameters=0.19
 
 # Output:
 #   myboard_00_back.ngc      - back copper traces
 #   myboard_01_drill.ngc     - drill + milldrill + outline (combined)
 
 # With --multi flag, also creates:
-pcb2gcode-wrapper myboard --mill-diameters=0.169 --multi
+pcb2gcode-wrapper myboard --mill-diameters=0.19 --multi
 #   myboard_000_all.ngc      - all operations with tool changes (sorts first)
 ```
 
@@ -50,7 +50,7 @@ Options:
   --output-dir DIR   Output directory for generated files
 
 # Examples:
-pcb2gcode-wrapper myboard --mill-diameters=0.169
+pcb2gcode-wrapper myboard --mill-diameters=0.19
 pcb2gcode-wrapper myboard --output-dir ./output --x-margin 10
 pcb2gcode-wrapper myboard --no-combine  # keep files separate
 ```
@@ -109,15 +109,15 @@ metric=true
 metricoutput=true
 
 # milling
-zwork=-0.06
+zwork=-0.17
 zsafe=20
 zchange=35
-mill-feed=100
+mill-feed=800
 mill-speed=12000
 nom6=1
 spinup-time=3.0
 spindown-time=3.0
-isolation-width=0.6
+isolation-width=0.3
 
 # Voronoi mode (optional, leaves more copper for easier soldering)
 voronoi=1
@@ -125,8 +125,8 @@ voronoi=1
 # drilling
 zdrill=-1.7
 zmilldrill=-1.7
-drill-feed=100
-drill-speed=12000
+drill-feed=300
+drill-speed=14000
 nog81=1
 drills-available=1.0
 min-milldrill-hole-diameter=1.01
@@ -134,7 +134,8 @@ milldrill-diameter=1.0
 
 # outline
 zcut=-1.7
-cut-feed=100
+cut-feed=200
+cut-vertfeed=200
 cut-speed=16000
 cutter-diameter=1.0
 cut-infeed=0.6
@@ -145,7 +146,8 @@ Key settings:
 - `nom6=1` - Prevents M6 commands that trip up some controllers
 - `nog81=1` - Uses G0/G1 instead of canned drill cycles
 - `zsafe` - Travel height; start high (20mm), lower once confident
-- `zwork` - Milling depth; start shallow (e.g., -0.05), adjust as needed
+- `zwork` - Milling depth; -0.17 works with a 30° V-bit with a 0.1mm tip
+- `--mill-diameters` - Cut width at `zwork`; for that bit, 0.1 + 2 × 0.17 × tan(15°) ≈ 0.19
 
 ## Requirements
 
